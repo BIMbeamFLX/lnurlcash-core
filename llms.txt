@@ -95,6 +95,23 @@ verify_note_signature_hash(id, ..) -> bool   raw: over exactly this 64-hex id
 cs1 message: "LNURLcash:" || amount_msat || ":" || hex(Q), Lightning
   signmessage digest, r||s||recid (either recid end accepted). An
   amount-bearing cs1 must state the amount it signs in its HRP.
+verify_rotation_certificate(spent_id, note_id, amount_msat, cr1, mint_pubkey)
+  -> bool   a rotate's OPTIONAL r (an extension, NOT LUD-25): the mint's
+  signed statement that it burned the note spent_id into exactly the one
+  note note_id (both hex(Q)), worth amount_msat. Never from a split or a
+  merge. ONLY a cr1 is read (no cs1, no raw hex), its signature r||s||recid
+  ONLY (a leading recid is refused, unlike a cs1's); never panics,
+  malformed = false. It is the signing key's statement, as good as the
+  mint's own record: a mint burns a note once, so it signs at most one per
+  spent note, but nothing offline shows there is no second. NOT proof that
+  note_id is still unspent.
+rotation_signature_message / rotation_signature_digest(spent_id, note_id,
+  amount_msat)   ids trimmed and lowercased, not otherwise checked
+cr1 message: "LNURLcash:rotate:" || amount_msat || ":" || hex(Q_spent) ||
+  ":" || hex(Q), signed and encoded as a cs1 is; its HRP must state the
+  amount. parse_mutation and client do NOT surface r yet: with your own
+  HTTP stack, read it off the rotate's response body and keep it if
+  is_cr1_with_amount.
 
 cash::derive_cash_root(seed) -> CashNode        LUD-25's scheme, BIP-32 m/139'
 cash::derive_cash_domain_node(root, host)       m/139'/d1/d2/d3/d4, d1..d4 =
@@ -132,6 +149,10 @@ encode_cw1/decode_cw1/is_cw1   script-path spend, Cw1 { locktime, sequence,
   and a control block committing to no key. Cw1::output_key()
 encode_cs1_with_amount/decode_cs1_with_amount   mint certificate, "cs" +
   BOLT-11 amount; encode_cs1/decode_cs1 the legacy fixed "cs"
+encode_cr1_with_amount/decode_cr1_with_amount/is_cr1_with_amount   mint
+  rotation certificate Cr1 { amount_msat, signature }, "cr" + BOLT-11
+  amount (1000 msat = cr10n1...), no fixed-"cr" form. A cs1 and a cr1 never
+  decode as each other
 encode_cx1/decode_cx1/is_cx1   watch-only branch Cx1 { pubkey_x_only,
   chain_code }, "cx". Decoders return None, never panic. No 90-char limit;
   all-uppercase accepted; mixed case, a bech32 (not bech32m) checksum, the
@@ -247,6 +268,9 @@ check_note / check_note_url -> FfiNoteCheck { output_key, spend:
 check_spend(k1, domain) -> FfiSpendCheck; recover_note_ownership_pubkey(hex,
   domain) -> FfiNoteOwner { pubkey_x_only, legacy }
 sign_address_proof(sk0_hex, action, domain, username)
+verify_rotation_certificate(spent_id, note_id, amount_msat, cr1,
+  mint_pubkey_hex); FfiCr1 { amount_msat, signature } +
+  encode_cr1_with_amount/decode_cr1_with_amount/is_cr1_with_amount
 FfiCw1 + encode_cw1/decode_cw1/is_cw1/bearer_cw1; spend_domain_of,
   key_path_sighash, script_path_sighash, tapleaf_hash, tapbranch_hash,
   taproot_tweak, taproot_tweak_secret_key, output_key_of, bearer_note,

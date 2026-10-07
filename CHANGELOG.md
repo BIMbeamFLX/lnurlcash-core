@@ -3,6 +3,66 @@
 Semantic versioning. While the LUD-25 draft is unmerged, `0.x` minor bumps may
 carry breaking changes; pin an exact version.
 
+## Unreleased
+
+### Rotation certificates (`cr1`)
+
+A note's `cs1` says the note exists. Nothing said where it came from, so an
+asset anchored to a note could not tell a real transfer from a look-alike
+note minted on the side, or from one of the two notes a split made of its
+predecessor. A SERVICE may now answer a rotate with `r`, a `cr1`: its signed
+statement that it burned one note into exactly one other, signed as a `cs1`
+is, by the same key, over
+`LNURLcash:rotate:<amount_msat>:<hex(Q_spent)>:<hex(Q)>`: the note it burned,
+the one note it credited in its place, and that note's value. A split or a
+merge gets none: neither has one note that became one other.
+
+It is an extension, not part of LUD-25, and a SERVICE that issues them still
+omits one it could not sign. The statement is the signing key's, as good as
+that SERVICE's own record of what it burned: a SERVICE burns a note once and
+so signs at most one for any spent note, and nothing checked offline can
+show that there is no second. Everything here is new; nothing existing
+changes.
+
+`recoverable`:
+
+- `encode_cr1_with_amount`, `decode_cr1_with_amount` (to `Cr1 { amount_msat,
+  signature }`) and `is_cr1_with_amount`. A `cr1` is encoded exactly as an
+  amount-bearing `cs1`, under the prefix `cr`: 1000 msat is `cr10n1...`. The
+  two share one implementation and never decode as each other. There is no
+  fixed-HRP `cr1`.
+
+`signature`:
+
+- `rotation_signature_message(spent_id, note_id, amount_msat)` and
+  `rotation_signature_digest`, like the note ones: both ids are `hex(Q)`,
+  trimmed and lowercased.
+- `verify_rotation_certificate(spent_id, note_id, amount_msat, cr1,
+  mint_pubkey) -> bool`. Never panics, and a malformed id, certificate or key
+  is a `false`. Only a `cr1` is read, never a `cs1` or raw hex; it must
+  state, in its human-readable part, the amount it signs; and its 65 bytes
+  are `r || s || recovery_id` only, as lnurl-mint writes one and lnurl-wallet
+  reads one. A note's certificate is still read with the recovery id at
+  either end, unchanged. It checks that the key signed this rotation, not
+  that the credited note is still outstanding.
+
+Over the FFI: `verify_rotation_certificate`, `encode_cr1_with_amount`,
+`decode_cr1_with_amount` (to the new record `FfiCr1 { amount_msat,
+signature }`) and `is_cr1_with_amount`. Four new functions and one new
+record.
+
+Not here yet: `parse_mutation` and the `client` do not surface `r`.
+`MutationResponse`, `client::RotateOutcome` and `FfiMutation` are plain
+structs with public fields, so giving them one more is a breaking change,
+and is left for a release that may carry one. Until then a caller with its
+own HTTP stack reads `r` off the rotate's response body and keeps it if
+`is_cr1_with_amount`; `Client::rotate_note` drops it.
+
+Graded against the fixed vector lnurl-mint and lnurl-wallet check themselves
+against (mint key `sha256("LNURLcash rotation certificate test vector")`,
+1000 and 21000000 msat): message, digest, RFC6979 signature and `cr1`, byte
+for byte.
+
 ## 0.2.0 - 2026-09-29
 
 Breaking. Follows LUD-25's unified taproot model (lnurl/luds `6e865b1`,

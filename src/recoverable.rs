@@ -19,8 +19,19 @@
 //! cx1<P || chain code>   a watch-only branch, 64 bytes
 //! ```
 //!
+//! And a sixth that is an extension, not LUD-25: a SERVICE may answer a
+//! rotate with a `cr1` as well, a `cs1`'s shape under its own prefix, its
+//! signed statement that it burned one note into exactly one other.
+//!
+//! ```text
+//! cr<amount>1<sig>       a mint's rotation certificate, 65 bytes
+//! ```
+//!
 //! The names and semantics follow the TypeScript kit, which follows
-//! lnurl-wallet's `src/lib`.
+//! lnurl-wallet's `src/lib`. Where they are known to differ is in what
+//! decodes: the kit lowercases a string first, where mixed case is refused
+//! here, as BIP-350 and lnurl-mint refuse it; and the kit stops a
+//! certificate's amount at 2^53 - 1, where any u64 is read here.
 
 use hmac::{Hmac, Mac};
 use k256::schnorr::{Signature as SchnorrSignature, SigningKey, VerifyingKey};
@@ -41,8 +52,9 @@ type HmacSha256 = Hmac<Sha256>;
 
 // ---- bech32m ----
 //
-// `ck1`, `cw1`, `cs1` and `cx1` all run past BIP-173's 90 characters, which
-// the draft deliberately does not adopt, and [`long_bech32`] enforces none.
+// `ck1`, `cw1`, `cs1`, `cr1` and `cx1` all run past BIP-173's 90 characters,
+// which the draft deliberately does not adopt, and [`long_bech32`] enforces
+// none.
 // BIP-350's own rules do apply, as lnurl-mint applies them: one case
 // throughout (all uppercase is the same string, mixed case is refused), a
 // bech32m checksum rather than a bech32 one, and zero padding bits. Every
@@ -257,6 +269,29 @@ fn decode_amount_suffix(value: &str) -> Option<u64> {
     amount.try_into().ok()
 }
 
+// An amount-bearing certificate: `prefix` and the signed amount as the
+// human-readable part, over a 65-byte recoverable signature. `cs1` and `cr1`
+// differ in the prefix alone, so a string is one or the other and never
+// both. A payload moved from one prefix to the other still decodes, and
+// verifies as nothing: the two sign different messages (see
+// [`crate::signature`]).
+
+fn encode_certificate(prefix: &str, amount_msat: u64, signature: &[u8; 65]) -> String {
+    encode_bytes(
+        &format!("{prefix}{}", encode_amount_suffix(amount_msat)),
+        signature,
+    )
+}
+
+fn decode_certificate(prefix: &str, value: &str) -> Option<(u64, [u8; 65])> {
+    let trimmed = value.trim();
+    let separator = trimmed.rfind('1')?;
+    let hrp = trimmed[..separator].to_ascii_lowercase();
+    let amount_msat = decode_amount_suffix(hrp.strip_prefix(prefix)?)?;
+    let signature = decode_fixed(&hrp, trimmed)?;
+    Some((amount_msat, signature))
+}
+
 /// Legacy fixed-HRP certificate, retained for compatibility with notes made
 /// before the amount moved into `cs1`. New code should use
 /// [`encode_cs1_with_amount`].
@@ -276,19 +311,11 @@ pub fn is_cs1(value: &str) -> bool {
 /// the signed amount using BOLT-11's amount suffix rules; the payload is the
 /// mint's 65-byte recoverable signature over that amount and the note key.
 pub fn encode_cs1_with_amount(amount_msat: u64, signature: &[u8; 65]) -> String {
-    encode_bytes(
-        &format!("cs{}", encode_amount_suffix(amount_msat)),
-        signature,
-    )
+    encode_certificate("cs", amount_msat, signature)
 }
 
 pub fn decode_cs1_with_amount(value: &str) -> Option<Cs1> {
-    let trimmed = value.trim();
-    let separator = trimmed.rfind('1')?;
-    let hrp = trimmed[..separator].to_ascii_lowercase();
-    let amount_msat = decode_amount_suffix(hrp.strip_prefix("cs")?)?;
-    let signature = decode_fixed(&hrp, trimmed)?;
-    Some(Cs1 {
+    decode_certificate("cs", value).map(|(amount_msat, signature)| Cs1 {
         amount_msat,
         signature,
     })
@@ -307,6 +334,37 @@ pub fn decode_any_cs1(value: &str) -> Option<[u8; 65]> {
 
 pub fn is_any_cs1(value: &str) -> bool {
     decode_any_cs1(value).is_some()
+}
+
+/// A decoded `cr1`: the amount committed in its human-readable part and the
+/// mint's raw 65-byte recoverable signature over the rotation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cr1 {
+    pub amount_msat: u64,
+    pub signature: [u8; 65],
+}
+
+/// A SERVICE's rotation certificate: its signed statement that it burned one
+/// note into exactly one other. An extension, not part of LUD-25. Shaped
+/// like [`encode_cs1_with_amount`]'s, the credited note's amount in the HRP
+/// included (`cr10n` for 1000 msat), under its own prefix; the payload is
+/// the mint's 65-byte recoverable signature, `r || s || recovery_id`, over
+/// that amount and both note keys. Check one with
+/// [`crate::signature::verify_rotation_certificate`].
+pub fn encode_cr1_with_amount(amount_msat: u64, signature: &[u8; 65]) -> String {
+    encode_certificate("cr", amount_msat, signature)
+}
+
+/// `None` for anything but a `cr1`, a `cs1` included.
+pub fn decode_cr1_with_amount(value: &str) -> Option<Cr1> {
+    decode_certificate("cr", value).map(|(amount_msat, signature)| Cr1 {
+        amount_msat,
+        signature,
+    })
+}
+
+pub fn is_cr1_with_amount(value: &str) -> bool {
+    decode_cr1_with_amount(value).is_some()
 }
 
 /// A watch-only branch export: the branch's x-only public key and its chain
@@ -664,7 +722,7 @@ mod tests {
         words.into_iter().with_checksum::<Ck>(hrp).chars().collect()
     }
 
-    fn samples() -> [(&'static str, String); 5] {
+    fn samples() -> [(&'static str, String); 6] {
         let ownership = sign_note_ownership(&[0x11; 32], DOMAIN).expect("a valid key");
         let pubkey = recover_note_ownership_pubkey(&ownership, DOMAIN)
             .expect("verifies")
@@ -677,6 +735,8 @@ mod tests {
                 encode_cw1(&bearer_cw1(&[0x44; 32]).expect("a cw1")).expect("encodes"),
             ),
             ("cs", encode_cs1_with_amount(21_000, &[0x33; 65])),
+            // the same amount and payload as the cs1: only the prefix differs
+            ("cr", encode_cr1_with_amount(21_000, &[0x33; 65])),
             ("cx", encode_cx1(&pubkey, &[0x22; 32])),
         ]
     }
@@ -687,6 +747,7 @@ mod tests {
             "ck" => is_ck1(value),
             "cw" => is_cw1(value),
             "cs" => is_cs1_with_amount(value),
+            "cr" => is_cr1_with_amount(value),
             "cx" => is_cx1(value),
             _ => unreachable!(),
         }
@@ -724,10 +785,10 @@ mod tests {
     #[test]
     fn non_zero_padding_is_refused() {
         // Every payload here leaves spare bits in the last five-bit group,
-        // which must be zero, except 65-byte cs1, which fills its groups
-        // exactly.
+        // which must be zero, except 65-byte cs1 and cr1, which fill their
+        // groups exactly.
         for (hrp, value) in samples() {
-            if hrp == "cs" {
+            if hrp == "cs" || hrp == "cr" {
                 continue;
             }
             let (prefix, mut words) = words_of(&value);
@@ -759,7 +820,7 @@ mod tests {
             long.as_str(),
             long_cw.as_str(),
         ] {
-            for hrp in ["cp", "ck", "cw", "cs", "cx"] {
+            for hrp in ["cp", "ck", "cw", "cs", "cr", "cx"] {
                 assert!(!decodes(hrp, value), "{hrp}: {value:?}");
             }
             assert_eq!(note_id_of(value), None);
@@ -770,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn tells_the_five_types_apart() {
+    fn tells_the_six_types_apart() {
         let samples = samples();
         for (hrp, value) in &samples {
             for (other, _) in &samples {
@@ -778,8 +839,52 @@ mod tests {
             }
         }
         let k1 = "11".repeat(32);
-        for hrp in ["cp", "ck", "cw", "cs", "cx"] {
+        for hrp in ["cp", "ck", "cw", "cs", "cr", "cx"] {
             assert!(!decodes(hrp, &k1), "a plain hex k1 is never a {hrp}1");
+        }
+    }
+
+    #[test]
+    fn a_cs1_and_a_cr1_never_decode_as_each_other() {
+        let signature = [0xab; 65];
+        let cs1 = encode_cs1_with_amount(1000, &signature);
+        let cr1 = encode_cr1_with_amount(1000, &signature);
+        assert!(cs1.starts_with("cs10n1") && cr1.starts_with("cr10n1"));
+        assert_eq!(cs1.len(), cr1.len());
+        assert_eq!(
+            decode_cr1_with_amount(&format!(" {} ", cr1.to_ascii_uppercase())),
+            Some(Cr1 {
+                amount_msat: 1000,
+                signature
+            })
+        );
+        assert_eq!(decode_cr1_with_amount(&cs1), None);
+        assert_eq!(decode_cs1_with_amount(&cr1), None);
+        // nor through the readers that take a certificate in any form
+        assert_eq!(decode_cs1(&cr1), None);
+        assert_eq!(decode_any_cs1(&cr1), None);
+        // there is no fixed-HRP cr1: the amount is not optional
+        assert_eq!(
+            decode_cr1_with_amount(&encode_bytes("cr", &signature)),
+            None
+        );
+        // and the amount is the HRP's, in every BOLT-11 unit
+        for amount_msat in [
+            0,
+            1,
+            1000,
+            21_000_000,
+            100_000_000,
+            100_000_000_000,
+            u64::MAX,
+        ] {
+            let cr1 = encode_cr1_with_amount(amount_msat, &signature);
+            assert_eq!(
+                decode_cr1_with_amount(&cr1).map(|cr1| cr1.amount_msat),
+                Some(amount_msat),
+                "{cr1}"
+            );
+            assert_eq!(decode_cs1_with_amount(&cr1), None, "{cr1}");
         }
     }
 

@@ -482,6 +482,27 @@ pub fn verify_note_signature_hash(
     signature::verify_note_signature_hash(id, amount_msat, signature_hex, mint_pubkey_hex)
 }
 
+/// Whether `cr1` is `mint_pubkey_hex`'s signed statement that it burned the
+/// note `spent_id` and credited exactly the one note `note_id`, worth
+/// `amount_msat`, in its place. Both ids are `hex(Q)`: what [`note_id_of`]
+/// gives for a spend, and [`decode_note`] for a `cp1` or a bearer note's
+/// hash. A mint may answer a rotate with one, as `r`, and never a split or a
+/// merge; it is an extension, not part of LUD-25. The statement is that
+/// key's, as good as the mint's own record of what it burned, and says
+/// nothing about whether `note_id` is still unspent. False for anything
+/// malformed, a `cs1` included, and for a signature that is not
+/// `r || s || recovery_id`.
+#[uniffi::export]
+pub fn verify_rotation_certificate(
+    spent_id: &str,
+    note_id: &str,
+    amount_msat: u64,
+    cr1: &str,
+    mint_pubkey_hex: &str,
+) -> bool {
+    signature::verify_rotation_certificate(spent_id, note_id, amount_msat, cr1, mint_pubkey_hex)
+}
+
 // ---- spends ----
 //
 // Every note is a taproot output key `Q`. Keys, scripts and control blocks
@@ -824,6 +845,22 @@ impl From<recoverable::Cs1> for FfiCs1 {
     }
 }
 
+/// A mint's rotation certificate, with its signature bytes as hex.
+#[derive(Debug, uniffi::Record)]
+pub struct FfiCr1 {
+    pub amount_msat: u64,
+    pub signature: String,
+}
+
+impl From<recoverable::Cr1> for FfiCr1 {
+    fn from(cr1: recoverable::Cr1) -> Self {
+        FfiCr1 {
+            amount_msat: cr1.amount_msat,
+            signature: hex::encode(cr1.signature),
+        }
+    }
+}
+
 /// A note's 32-byte output key `Q` as a `cp1`.
 #[uniffi::export]
 pub fn encode_cp1(pubkey_x_only_hex: &str) -> FfiResult<String> {
@@ -910,6 +947,27 @@ pub fn decode_any_cs1(value: &str) -> Option<String> {
 #[uniffi::export]
 pub fn is_any_cs1(value: &str) -> bool {
     recoverable::is_any_cs1(value)
+}
+
+/// A mint's rotation certificate: shaped like an amount-bearing `cs1`, under
+/// the prefix `cr`. Check one with [`verify_rotation_certificate`].
+#[uniffi::export]
+pub fn encode_cr1_with_amount(amount_msat: u64, signature_hex: &str) -> FfiResult<String> {
+    Ok(recoverable::encode_cr1_with_amount(
+        amount_msat,
+        &hex_array(signature_hex, "a certificate")?,
+    ))
+}
+
+/// Null for anything but a `cr1`, a `cs1` included.
+#[uniffi::export]
+pub fn decode_cr1_with_amount(value: &str) -> Option<FfiCr1> {
+    recoverable::decode_cr1_with_amount(value).map(Into::into)
+}
+
+#[uniffi::export]
+pub fn is_cr1_with_amount(value: &str) -> bool {
+    recoverable::is_cr1_with_amount(value)
 }
 
 #[uniffi::export]

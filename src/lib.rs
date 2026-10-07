@@ -89,8 +89,9 @@ pub use secrets::{generate_note_secret, hash_k1, is_preimage};
 pub use signature::{
     address_proof_digest, address_proof_message, check_note, check_note_certificate,
     note_signature_digest, note_signature_digest_for_hash, note_signature_message,
-    note_signature_message_for_hash, sign_address_proof, verify_note_signature,
-    verify_note_signature_hash, CertifiedOver, NoteCheck,
+    note_signature_message_for_hash, rotation_signature_digest, rotation_signature_message,
+    sign_address_proof, verify_note_signature, verify_note_signature_hash,
+    verify_rotation_certificate, CertifiedOver, NoteCheck,
 };
 pub use spend::{
     check_spend, decode_note, decode_spend, spend_domain_of, SpendCheck, SpendVerdict,

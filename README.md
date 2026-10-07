@@ -286,6 +286,28 @@ responses and the informational GET, and a certified note URL carries
 `c`, `c2` and `&c=` are written. The registration proof's request parameter
 stays `sig`.
 
+A mint may answer a rotate with one more certificate, `r`: a `cr1` rotation
+certificate, its signed statement that it burned one note into exactly one
+other, over `LNURLcash:rotate:<amount_msat>:<hex(Q_spent)>:<hex(Q)>`,
+encoded like a `cs1` under the prefix `cr` (`cr10n1...` for 1000 msat). It
+is an extension, not part of LUD-25, and a mint that issues them still omits
+one it could not sign. A `cs1` says a note exists; a `cr1` says which one
+note it came from. A mint burns a note once, so it signs at most one such
+statement for any spent note, and a split or a merge gets none. With one per
+transfer, the holder of an asset anchored to a note can check each step of
+its history against the mint's key alone. That is as far as it goes: the
+statement is the signing key's, no stronger than the mint's own record of
+what it burned, and nothing checked offline can show there is no second one
+for the same note.
+`verify_rotation_certificate(spent_id, note_id, amount_msat, cr1, mint_pubkey)`
+checks one, both ids being `hex(Q)` (`note_id_of` gives it for any spend),
+and reads its signature as `r || s || recovery id` only. It does not say the
+note is still unspent.
+`encode_cr1_with_amount`, `decode_cr1_with_amount` and `is_cr1_with_amount`
+are its codec, and a `cs1` and a `cr1` never decode as each other.
+`parse_mutation` and the client do not surface `r` yet: a caller with its
+own HTTP stack reads it off the rotate's response body.
+
 Registering or unregistering a Lightning Address uses the branch's purpose-0
 index-0 private key. `sign_address_proof(&sk0, action, domain, username)` returns the
 raw 64-byte BIP-340 proof over

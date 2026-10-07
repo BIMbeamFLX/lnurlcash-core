@@ -23,13 +23,29 @@
 //! a `ck1` states its `Q` in plain sight, so anyone who has seen a note's
 //! `cp1` and `cs1` can pair them with a signature that opens nothing.
 //! [`check_note`] makes both checks, which is why it needs the mint's domain.
+//!
+//! A SERVICE may answer a rotate with a second certificate, a `cr1`: the
+//! same kind of signature, by the same key, over the note it burned, the one
+//! note it credited in its place, and that note's value. That one is an
+//! extension, not part of LUD-25.
+//!
+//! ```text
+//! message = "LNURLcash:rotate:" || amount_msat || ":" || hex(Q_spent) || ":" || hex(Q)
+//! ```
+//!
+//! A `cs1` says a note exists. A `cr1` says which one note it came from. A
+//! SERVICE burns a note once, so it signs at most one such statement for any
+//! `Q_spent`, and that is what an asset anchored to a note needs each of its
+//! transfers to carry. The statement is the signing key's, and no stronger
+//! than that SERVICE's own record of what it burned. See
+//! [`verify_rotation_certificate`].
 
 use k256::schnorr::SigningKey;
 use secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
 use secp256k1::Message;
 use sha2::{Digest, Sha256};
 
-use crate::recoverable::{decode_cs1, decode_cs1_with_amount, note_id_of};
+use crate::recoverable::{decode_cr1_with_amount, decode_cs1, decode_cs1_with_amount, note_id_of};
 use crate::spend::{check_spend, decode_note, decode_spend, spend_domain_of, SpendVerdict};
 
 const LIGHTNING_SIGNED_MESSAGE_PREFIX: &[u8] = b"Lightning Signed Message:";
@@ -152,7 +168,7 @@ pub fn verify_note_signature_hash(
     mint_pubkey_hex: &str,
 ) -> bool {
     let id = id.trim();
-    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !is_note_id(id) {
         return false;
     }
     let trimmed = signature_hex.trim();
@@ -169,16 +185,53 @@ pub fn verify_note_signature_hash(
             Err(_) => return false,
         }
     };
+    recovers_to(
+        note_signature_digest_for_hash(id, amount_msat),
+        &signature,
+        mint_pubkey_hex,
+        RecoveryIdAt::EitherEnd,
+    )
+}
+
+/// A note id as a certificate is checked over: 32 bytes of hex.
+fn is_note_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Which end of a 65-byte recoverable signature may carry its recovery id.
+#[derive(Clone, Copy)]
+enum RecoveryIdAt {
+    /// `r || s || recovery_id` only: what LUD-25 calls for.
+    Trailing,
+    /// That, or `recovery_id || r || s`: a note's certificate has been
+    /// issued both ways (see [`verify_note_signature_hash`]).
+    EitherEnd,
+}
+
+/// Whether a 65-byte recoverable signature over `digest` recovers to
+/// `mint_pubkey_hex`, reading the recovery id where `recovery_id` allows.
+/// What every certificate check here comes down to.
+fn recovers_to(
+    digest: [u8; 32],
+    signature: &[u8],
+    mint_pubkey_hex: &str,
+    recovery_id: RecoveryIdAt,
+) -> bool {
     if signature.len() != 65 {
         return false;
     }
-    let message = Message::from_digest(note_signature_digest_for_hash(id, amount_msat));
+    let message = Message::from_digest(digest);
     let target = mint_pubkey_hex.trim().to_ascii_lowercase();
     // (compact 64 bytes, recovery id) under each candidate ordering
     let trailing = (&signature[..64], signature[64]);
     let leading = (&signature[1..65], signature[0]);
+    let layouts = [trailing, leading];
+    let layouts = match recovery_id {
+        RecoveryIdAt::Trailing => &layouts[..1],
+        RecoveryIdAt::EitherEnd => &layouts[..],
+    };
 
-    for (compact, recovery) in [trailing, leading] {
+    for &(compact, recovery) in layouts {
         let Ok(id) = RecoveryId::try_from(i32::from(recovery)) else {
             continue;
         };
@@ -312,4 +365,74 @@ pub fn verify_note_signature(
 ) -> bool {
     check_note(k1, domain, amount_msat, signature, mint_pubkey)
         .is_some_and(|check| check.is_verified())
+}
+
+// ---- rotation certificates ----
+
+/// The message a SERVICE certifies a rotation with: the note it burned, the
+/// one note it credited in its place, and that note's value. Each id is a
+/// note's `hex(Q)`, trimmed and lowercased, and not otherwise checked. Told
+/// apart from a note's own message by its second field, which there is
+/// always a decimal amount.
+pub fn rotation_signature_message(spent_id: &str, note_id: &str, amount_msat: u64) -> String {
+    format!(
+        "{DOMAIN_TAG}:rotate:{amount_msat}:{}:{}",
+        spent_id.trim().to_ascii_lowercase(),
+        note_id.trim().to_ascii_lowercase()
+    )
+}
+
+pub fn rotation_signature_digest(spent_id: &str, note_id: &str, amount_msat: u64) -> [u8; 32] {
+    lightning_signed_digest(&rotation_signature_message(spent_id, note_id, amount_msat))
+}
+
+/// Check a `cr1`: a SERVICE's signed statement that it burned the note
+/// `spent_id` and credited exactly the one note `note_id`, worth
+/// `amount_msat`, in its place. Both ids are 64-hex `hex(Q)`.
+///
+/// A SERVICE may answer a rotate with one, as `r`, and never a split or a
+/// merge: neither has one note that became one other. It is an extension,
+/// not part of LUD-25, and a SERVICE that issues them still omits one it
+/// could not sign. A SERVICE burns a note once, so it signs at most one such
+/// statement for any `spent_id`, and with one per transfer a holder can
+/// check, against that key alone, each step something anchored to a note
+/// took from note to note.
+///
+/// That is all it is: the signing key's statement, as good as that
+/// SERVICE's own record of what it burned. Nothing checked offline can show
+/// that no second certificate names the same `spent_id`. Nor does it say
+/// `note_id` is still outstanding: its holder may have spent it since.
+///
+/// Only a `cr1` is read, never a `cs1` or raw hex, and it must state
+/// `amount_msat` in its human-readable part as well as sign it. Its 65
+/// bytes are `r || s || recovery_id` and nothing else, as the TypeScript
+/// kit and lnurl-mint read one. A note's certificate is still read with the
+/// recovery id at either end (see [`verify_note_signature_hash`]), for the
+/// sake of ones issued that way; a `cr1` is new, and reading both here
+/// would only make a certificate one wallet takes and another refuses.
+///
+/// Never panics. A malformed id, certificate or key is a `false`.
+pub fn verify_rotation_certificate(
+    spent_id: &str,
+    note_id: &str,
+    amount_msat: u64,
+    cr1: &str,
+    mint_pubkey_hex: &str,
+) -> bool {
+    let (spent_id, note_id) = (spent_id.trim(), note_id.trim());
+    if !is_note_id(spent_id) || !is_note_id(note_id) {
+        return false;
+    }
+    let Some(cr1) = decode_cr1_with_amount(cr1) else {
+        return false;
+    };
+    if cr1.amount_msat != amount_msat {
+        return false;
+    }
+    recovers_to(
+        rotation_signature_digest(spent_id, note_id, amount_msat),
+        &cr1.signature,
+        mint_pubkey_hex,
+        RecoveryIdAt::Trailing,
+    )
 }
